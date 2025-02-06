@@ -1,153 +1,80 @@
-const { spawn } = require('child_process');
+const { spawn, appendFileSync } = require('child_process');
+const os = require('os');
+const fs = require('fs');
+const logFile = 'terminal_log.log';
+const path = require('path');
 
-// Create a persistent shell
+// Create a persistent shell using cmd.exe instead of WSL
 let shell;
 let allOutput = '';
 try {
-    shell = spawn('zsh', [], { stdio: ['pipe', 'pipe', 'pipe'] });
-    if (shell.stdin.writable) {
-        shell.stdin.write('source ~/.zshrc\n');
-    }
+    shell = os.platform() === 'win32' ? spawn('cmd.exe', [], { stdio: ['pipe', 'pipe', 'pipe'] }) : spawn(os.userInfo().shell || '/bin/bash', [], { stdio: ['pipe', 'pipe', 'pipe'] });
 
     shell.stdout.on('data', (data) => {
-        allOutput += data.toString(); // Append to buffer
+        allOutput += data.toString();
+        fs.appendFileSync(logFile, `[OUTPUT] ${data.toString()}`);
+    });
+
+    shell.stderr.on('data', (data) => {
+        fs.appendFileSync(logFile, `[ERROR] ${data.toString()}`);
     });
 
     shell.on('error', (err) => {
-        console.error('Failed to start zsh:', err);
-        // Fallback to bash if zsh fails
-        shell = spawn('bash', [], { stdio: ['pipe', 'pipe', 'pipe'] });
+        console.error('Failed to start shell:', err);
+        fs.appendFileSync(logFile, `[ERROR] Failed to start shell: ${err.message}\n`);
+        shell = spawn('cmd.exe', [], { stdio: ['pipe', 'pipe', 'pipe'] });
     });
 
     shell.on('exit', (code, signal) => {
         console.log(`Shell exited with code ${code} and signal ${signal}`);
+        fs.appendFileSync(logFile, `[EXIT] Shell exited with code ${code} and signal ${signal}\n`);
     });
 
 } catch (e) {
     console.error('Error spawning shell:', e);
-    // Fallback to bash in case of an unexpected error in try block
-    shell = spawn('bash', [], { stdio: ['pipe', 'pipe', 'pipe'] });
+    fs.appendFileSync(logFile, `[ERROR] Error spawning shell: ${e.message}\n`);
+    shell = spawn('cmd.exe', [], { stdio: ['pipe', 'pipe', 'pipe'] });
 }
 const delimiter = 'COMMAND_FINISHED_DELIMITER';
-let output = "";
+let output = '';
 
-/**
- * @openapi
- * /api/runTerminalScript:
- *   get:
- *     summary: Execute a shell command - from git commands to running code, listing files, or anything else that's possible to do through a shell command.
- *     description: This endpoint allows users to execute arbitrary shell commands, use it only after checking listCommands to check if appropriate command was created before.
- *     operationId: runTerminalScript
- *     parameters:
- *       - in: query
- *         name: command
- *         required: true
- *         description: The shell command to execute.
- *         schema:
- *           type: string
- *     responses:
- *       '200':
- *         description: Command executed successfully.
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 message:
- *                   type: string
- *                   description: A message indicating the success of the command execution.
- *                 output:
- *                   type: string
- *                   description: The output of the executed command.
- *       '400':
- *         description: Bad request (e.g., missing command parameter).
- *       '500':
- *         description: Internal server error (e.g., error executing command).
- */
-function terminalHandler(req, res) {
-    console.log('execute command');
-    res.setHeader('Access-Control-Allow-Origin', 'https://chat.openai.com');
-    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-    res.setHeader('Access-Control-Allow-Headers', 'Content-Type, openai-conversation-id, openai-ephemeral-user-id');
-    res.setHeader('Access-Control-Allow-Credentials', true);
-
-    // Handle preflight request (OPTIONS method)
-    if (req.method === 'OPTIONS') {
-        res.status(200).end();
-        return;
-    }
-
-    const command = req.query.command;
-    if (!command) {
-        return res.status(400).json({message: 'Command parameter is required.'});
-    }
-
+function runShellCommand(command, args = [], callback) {
+    console.log('Executing command:', command);
+    fs.appendFileSync(logFile, `[INPUT] ${command} ${args.join(' ')}\n`);
+    shell.stdin.write(`${command} ${args.join(' ')} & echo ${delimiter}\n`);
+    
     const getOutput = (data) => {
-        let timeoutId = setTimeout(() => {
-            console.log("Command timed out.");
-            shell.stdin.write("\x03"); // Send Ctrl+C to interrupt
-            processOutput(output + "\n[INFO] Command timed out.");
-            output = "";
-        }, 10000); // 10-second timeout
         output += data.toString();
-        console.log('data', data.toString())
-        clearTimeout(timeoutId);
+        fs.appendFileSync(logFile, `[OUTPUT] ${data.toString()}`);
         if (output.includes(delimiter)) {
-            console.log('delimeter found');
-            // Remove the delimiter from the output
             output = output.replace(delimiter, '');
             processOutput(output);
             output = '';
         }
     };
+    
     shell.stdout.on('data', getOutput);
     const getError = (data) => {
         output += data;
+        fs.appendFileSync(logFile, `[ERROR] ${data.toString()}`);
     };
     shell.stderr.on('data', getError);
 
     function processOutput(output) {
         console.log(`Command executed successfully. Output: ${output}`);
+        fs.appendFileSync(logFile, `[SUCCESS] ${output}\n`);
         shell.stdout.removeListener('data', getOutput);
         shell.stderr.removeListener('data', getError);
-        if (output.length < 4097) {
-            return res.status(200).json({message: 'Command executed successfully.', output});
-        } else {
-            return res.status(200).json({
-                message: 'Command executed successfully. But size is too big, returning 3900 first symbols',
-                output: output.substr(0, 3900)
-            });
-        }
+        callback({ output });
     }
-
-    // Append the delimiter to the command
-    console.log(command);
-    shell.stdin.write(`${command}; echo ${delimiter}\n`);
 }
 
-/**
- * @openapi
- * /api/interrupt:
- *   post:
- *     summary: Interrupts a running terminal command.
- *     description: This endpoint allows users to send a SIGINT signal to interrupt any currently running terminal command.
- *     operationId: interruptCommand
- *     responses:
- *       200:
- *         description: Command interrupted successfully.
- *       405:
- *         description: Method not allowed. Please use POST.
- */
 function interruptHandler(req, res) {
     if (req.method === "POST") {
-        // Send SIGKILL to terminate the shell
-        shell.kill("SIGKILL");
+        shell.kill();
         console.log("Sent SIGKILL to terminate the command.");
-        
-        // Create a new shell instance
-        shell = spawn('sh', [], { stdio: ['pipe', 'pipe', 'pipe'] });
-        
-        // Return the latest output and then reset it
+        fs.appendFileSync(logFile, `[INFO] Sent SIGKILL to terminate command\n`);
+        shell = spawn('cmd.exe', [], { stdio: ['pipe', 'pipe', 'pipe'] });
         res.status(200).json({ message: "Command interrupted.", output });
         output = "";
     } else {
@@ -157,14 +84,47 @@ function interruptHandler(req, res) {
 
 function getCurrentDirectory() {
     return new Promise((resolve, reject) => {
-        shell.stdin.write("pwd\n");
+        shell.stdin.write("cd\n");
         shell.stdout.once('data', (data) => {
+            fs.appendFileSync(logFile, `[OUTPUT] Current Directory: ${data.toString().trim()}\n`);
             resolve(data.toString().trim());
         });
         shell.stderr.once('data', (data) => {
+            fs.appendFileSync(logFile, `[ERROR] ${data.toString().trim()}\n`);
             reject(new Error(data.toString().trim()));
         });
     });
 }
+function writeFileWithPython(filePath, content, callback) {
+    const pythonExecutable = "python"; // Use "python3" if needed
+    const scriptPath = path.join(__dirname, "../utils/file_writer.py");  // ✅ Updated path
+    
+    const absoluteFilePath = path.resolve(filePath);
+    const process = spawn(pythonExecutable, [scriptPath, absoluteFilePath, content]);
+    
+    let output = "";
+    let error = "";
 
-module.exports = {getCurrentDirectory, interruptHandler, terminalHandler};
+    process.stdout.on("data", (data) => {
+        output += data.toString();
+    });
+
+    process.stderr.on("data", (data) => {
+        error += data.toString();
+    });
+
+    process.on("close", (code) => {
+        if (code === 0) {
+            callback(null, output);
+        } else {
+            callback(error || "Unknown error occurred.");
+        }
+    });
+}
+
+module.exports = {
+    runShellCommand,
+    interruptHandler,
+    getCurrentDirectory,
+    writeFileWithPython,
+};

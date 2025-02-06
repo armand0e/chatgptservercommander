@@ -1,22 +1,34 @@
 function stringifyError(err) {
-    if (!(err instanceof Error)) throw new TypeError("Only Error instances can be stringified");
-
-    const errorObject = {
-        name: err.name,
-        message: err.message,
-        stack: err.stack,
-    };
-
-    // Add any additional properties that are specific to the Error type
-    // or the environment (such as 'code' in Node.js errors)
-    if ('code' in err) {
-        errorObject.code = err.code;
+    if (!(err instanceof Error)) {
+        console.warn("Warning: Non-Error object passed to stringifyError:", err);
+        return JSON.stringify({ error: "Invalid error object received" }, null, 2);
     }
 
-    // Convert to a JSON string
-    return JSON.stringify(errorObject, null, 2);
+    const errorObject = {
+        name: err.name || "UnknownError",
+        message: err.message || "No message provided",
+        stack: err.stack || "No stack trace available",
+        timestamp: new Date().toISOString(),
+    };
+
+    // Capture additional error properties dynamically
+    Object.getOwnPropertyNames(err).forEach((prop) => {
+        if (!["name", "message", "stack"].includes(prop)) {
+            errorObject[prop] = err[prop];
+        }
+    });
+
+    try {
+        return JSON.stringify(errorObject, null, 2);
+    } catch (serializationError) {
+        return JSON.stringify({
+            name: "SerializationError",
+            message: "Error serializing original error object",
+            originalError: errorObject,
+        }, null, 2);
+    }
 }
 
 module.exports = {
-    stringifyError
-}
+    stringifyError,
+};

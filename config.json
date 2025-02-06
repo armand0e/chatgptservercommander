@@ -1,0 +1,6 @@
+{
+    "port": 3000,
+    "useLocalTunnel": true,
+    "localTunnelSubdomain": "gpt-server",
+    "authToken": "72872413384743a4b35960ad922bb901"
+}
